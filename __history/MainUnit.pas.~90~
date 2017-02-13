@@ -1,0 +1,282 @@
+unit MainUnit;
+
+interface
+
+uses
+  Winapi.Windows, Winapi.Messages, System.SysUtils, System.Classes, Vcl.Graphics,
+  Vcl.Controls, Vcl.SvcMgr, Vcl.Dialogs, System.IniFiles, Winapi.Shlobj, System.DateUtils;
+
+type
+  TDelTempFiles = class(TService)
+    procedure ServiceExecute(Sender: TService);
+    procedure ServiceAfterInstall(Sender: TService);
+  private
+    { Private declarations }
+  public
+    function GetServiceController: TServiceController; override;
+    function GetSpecialFolderPath(Folder: Integer; CanCreate: Boolean): string;
+    function GetLoggedInUser(): string;
+    procedure Deletefiles(filePath, FileExt: string; timeDiffToDelete: Integer);
+    function FileDateTimeToDateTime(const FileTime: TFileTime): TDateTime;
+  end;
+
+var
+  DelTempFiles: TDelTempFiles;
+
+type
+  WTS_INFO_CLASS = (
+    WTSInitialProgram,
+    WTSApplicationName,
+    WTSWorkingDirectory,
+    WTSOEMId,
+    WTSSessionId,
+    WTSUserName,
+    WTSWinStationName,
+    WTSDomainName,
+    WTSConnectState,
+    WTSClientBuildNumber,
+    WTSClientName,
+    WTSClientDirectory,
+    WTSClientProductId,
+    WTSClientHardwareId,
+    WTSClientAddress,
+    WTSClientDisplay,
+    WTSClientProtocolType,
+    WTSIdleTime,
+    WTSLogonTime,
+    WTSIncomingBytes,
+    WTSOutgoingBytes,
+    WTSIncomingFrames,
+    WTSOutgoingFrames,
+    WTSClientInfo,
+    WTSSessionInfo,
+    WTSSessionInfoEx,
+    WTSConfigInfo,
+    WTSValidationInfo,
+    WTSSessionAddressV4,
+    WTSIsRemoteSession
+  );
+
+  WTS_CONNECTSTATE_CLASS = (
+    WTSActive,
+    WTSConnected,
+    WTSConnectQuery,
+    WTSShadow,
+    WTSDisconnected,
+    WTSIdle,
+    WTSListen,
+    WTSReset,
+    WTSDown,
+    WTSInit
+  );
+
+  PWTS_SESSION_INFO = ^WTS_SESSION_INFO;
+  WTS_SESSION_INFO = record
+    SessionId: DWORD;
+    pWinStationName: LPTSTR;
+    State: WTS_CONNECTSTATE_CLASS;
+  end;
+
+const
+  WTS_CURRENT_SERVER_HANDLE: THANDLE = 0;
+
+{ Get Logged in USer }
+function WTSEnumerateSessions(hServer: THandle; Reserved: DWORD; Version: DWORD; var ppSessionInfo: PWTS_SESSION_INFO; var pCount: DWORD): BOOL; stdcall; external 'Wtsapi32.dll' name {$IFDEF UNICODE}'WTSEnumerateSessionsW'{$ELSE}'WTSEnumerateSessionsA'{$ENDIF};
+function WTSQuerySessionInformation(hServer: THandle; SessionId: DWORD; WTSInfoClass: WTS_INFO_CLASS; var ppBuffer: LPTSTR; var pBytesReturned: DWORD): BOOL; stdcall; external 'Wtsapi32.dll' name {$IFDEF UNICODE}'WTSQuerySessionInformationW'{$ELSE}'WTSQuerySessionInformationA'{$ENDIF};
+procedure WTSFreeMemory(pMemory: Pointer); stdcall; external 'Wtsapi32.dll';
+
+implementation
+
+{$R *.DFM}
+
+procedure ServiceController(CtrlCode: DWord); stdcall;
+begin
+  DelTempFiles.Controller(CtrlCode);
+end;
+
+function TDelTempFiles.GetServiceController: TServiceController;
+begin
+  Result := ServiceController;
+end;
+
+
+procedure TDelTempFiles.ServiceAfterInstall(Sender: TService);
+var
+  iniFile                            : TIniFile;
+  desktopPath, downloadPath, tmpPath : String;
+  userLoggedIn                       : String;
+begin
+  userLoggedIn := GetLoggedInUser();
+  tmpPath      := GetSpecialFolderPath(CSIDL_COMMON_DESKTOPDIRECTORY, false) + '\';
+  desktopPath  := StringReplace(tmpPath, '\Public\', '\' + userLoggedIn + '\',
+                      [rfReplaceAll, rfIgnoreCase]);
+  downloadPath := StringReplace(desktopPath, '\Desktop\', '\Downloads\',
+                      [rfReplaceAll, rfIgnoreCase]);
+
+  iniFile := TIniFile.Create(ExtractFilePath(ParamStr(0)) + 'DelTempFile.ini');
+  try
+    with iniFile do
+    begin
+      WriteString('job_1',  'filePathToCheckFiles', downloadPath);
+      WriteString('job_1',  'fileExtensionToDel', 'rtc');
+      WriteInteger('job_1', 'secondsOldToDel', 0);
+
+      WriteString('job_2',  'filePathToCheckFiles', downloadPath);
+      WriteString('job_2',  'fileExtensionToDel', 'fbr');
+      WriteInteger('job_2', 'secondsOldToDel', 172800);
+
+      WriteString('job_3',  'filePathToCheckFiles', desktopPath);
+      WriteString('job_3',  'fileExtensionToDel', 'rtc');
+      WriteInteger('job_3', 'secondsOldToDel', 0);
+
+      WriteString('job_4',  'filePathToCheckFiles', desktopPath);
+      WriteString('job_4',  'fileExtensionToDel', 'fbr');
+      WriteInteger('job_4', 'secondsOldToDel', 172800);
+    end;
+  finally
+    iniFile.Free;
+  end;
+end;
+
+
+procedure TDelTempFiles.ServiceExecute(Sender: TService);
+var
+  iniFile                : TIniFile;
+  filePath, job, fileExt : String;
+  I, secToDel            : Integer;
+  JobsDone               : Boolean;
+//  logFile                : TextFile;
+begin
+  Count := 0;
+  while not Terminated do
+  begin
+    I        := 0;
+    JobsDone := False;
+    iniFile  := TIniFile.Create(ExtractFilePath(ParamStr(0)) + 'DelTempFile.ini');
+
+    while not JobsDone do
+    begin
+      Inc(Count);
+      if Count >= SecBetweenRuns then
+      begin
+        Count := 0;
+        Inc(I);
+        job := 'job_' + intToStr(I);
+
+        filePath := iniFile.ReadString(job, 'filePathToCheckFiles', '');
+        fileExt  := iniFile.ReadString(job, 'fileExtensionToDel', '');
+        secToDel := iniFile.ReadInteger(job, 'secondsOldToDel', 0);
+
+  //      // ---> Temp for testing
+  //      AssignFile(logFile, 'c:\log.txt');
+  //      if FileExists('c:\log.txt') then
+  //        Append(logFile)
+  //      else
+  //        Rewrite(logFile);
+  //      WriteLn(logFile, job);
+  //      WriteLn(logFile, filePath);
+  //      WriteLn(logFile, fileExt);
+  //      CloseFile(logFile);
+  //      // <--- end
+
+        if (filePath <> '') then
+        begin
+          Deletefiles(filePath, fileExt, secToDel);
+        end
+        else
+        begin
+          JobsDone := True;
+        end;
+      end;
+    end;
+    Sleep(1000);
+    ServiceThread.ProcessRequests(False);
+    iniFile.Free;
+  end;
+end;
+
+
+function TDelTempFiles.GetSpecialFolderPath(Folder: Integer; CanCreate: Boolean): string;
+var
+  FilePath: array [0..255] of char;
+begin
+  SHGetSpecialFolderPath(0, @FilePath[0], Folder, CanCreate);
+  Result := FilePath;
+end;
+
+
+function TDelTempFiles.GetLoggedInUser() : string;
+var
+  Sessions, Session: PWTS_SESSION_INFO;
+  NumSessions, I, NumBytes: DWORD;
+  UserName: LPTSTR;
+begin
+  if not WTSEnumerateSessions(WTS_CURRENT_SERVER_HANDLE, 0, 1, Sessions, NumSessions) then
+    RaiseLastOSError;
+  try
+    if NumSessions > 0 then
+    begin
+      Session := Sessions;
+      for I := 0 to NumSessions-1 do
+      begin
+        if Session.State = WTSActive then
+        begin
+          if WTSQuerySessionInformation(WTS_CURRENT_SERVER_HANDLE, Session.SessionId, WTSUserName, UserName, NumBytes) then
+          begin
+            try
+              Result := UserName;
+            finally
+              WTSFreeMemory(UserName);
+            end;
+          end;
+        end;
+        Inc(Session);
+      end;
+    end;
+  finally
+    WTSFreeMemory(Sessions);
+  end;
+end;
+
+
+procedure TDelTempFiles.Deletefiles(filePath, fileExt: string; timeDiffToDelete: Integer);
+var
+  SearchRecs     : TSearchRec;
+  filesFound     : Integer;
+  fad            : TWin32FileAttributeData;
+  timeDiffResult : Integer;
+begin
+  filePath := IncludeTrailingPathDelimiter(filePath);
+  fileExt  := '*.' + FileExt;
+
+  filesFound := FindFirst(filePath + fileExt, faAnyFile, SearchRecs);
+  while filesFound = 0 do
+  begin
+    filePath := filePath + SearchRecs.Name;
+    if not GetFileAttributesEx(PChar(filePath), GetFileExInfoStandard, @fad) then
+      RaiseLastOSError;
+
+    timeDiffResult := SecondsBetween(FileDateTimeToDateTime(fad.ftCreationTime), Now);
+
+    if timeDiffResult >= timeDiffToDelete then
+      DeleteFile(filePath);
+
+    filesFound := System.SysUtils.FindNext(SearchRecs);
+  end;
+  FindClose(SearchRecs);
+end;
+
+
+function TDelTempFiles.FileDateTimeToDateTime(const FileTime: TFileTime): TDateTime;
+var
+  SystemTime, LocalTime: TSystemTime;
+begin
+  if not FileTimeToSystemTime(FileTime, SystemTime) then
+    RaiseLastOSError;
+  if not SystemTimeToTzSpecificLocalTime(nil, SystemTime, LocalTime) then
+    RaiseLastOSError;
+  Result := SystemTimeToDateTime(LocalTime);
+end;
+
+
+end.

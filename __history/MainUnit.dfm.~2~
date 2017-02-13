@@ -1,0 +1,6 @@
+object DelTempFiles: TDelTempFiles
+  OldCreateOrder = False
+  DisplayName = 'Delete Temp Files'
+  Height = 150
+  Width = 215
+end
