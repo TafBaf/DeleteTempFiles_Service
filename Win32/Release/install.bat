@@ -1,1 +1,1 @@
-C:\Users\Tafka\OneDrive\Documents\_MyDevelop\Delphi\DeleteTempFiles_Service\Win32\Release\DeleteTempFiles.exe /install 
+C:\[path to service exe]\DeleteTempFiles.exe /install 
